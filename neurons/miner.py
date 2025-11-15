@@ -53,6 +53,11 @@ class Miner(BaseMinerNeuron):
             priority_fn=self.priority,
         )
         
+        # Counters
+        self.request_count = 0
+        self.cache_hits = 0
+        self.api_calls = 0
+
         # TODO(miner): Anything specific to your use case you can do here
         self.device: torch.device = torch.device(get_device_str())
         self.openmeteo_api = openmeteo_requests.Client()
@@ -70,35 +75,29 @@ class Miner(BaseMinerNeuron):
     async def forward(self, synapse: TimePredictionSynapse) -> TimePredictionSynapse:
         """
         Processes the incoming TimePredictionSynapse for a prediction.
-
-        Args:
-            synapse (TimePredictionSynapse): The synapse object containing the time range and coordinates
-
-        Returns:
-            TimePredictionSynapse: The synapse object with the 'predictions' field set".
         """
-        # shape (lat, lon, 2) so a grid of locations
+        # increment total received requests
+        self.request_count += 1
+
         coordinates = torch.Tensor(synapse.locations)
         start_time_dt = to_timestamp(synapse.start_time)
         end_time_dt = to_timestamp(synapse.end_time)
 
         bt.logging.info(
-            f"Received request! Predicting {synapse.requested_hours} hours of "
-            f"{synapse.variable} for grid of shape {coordinates.shape}."
+            f"[Request #{self.request_count}] "
+            f"Predicting {synapse.requested_hours}h of {synapse.variable} "
+            f"for grid {coordinates.shape}"
         )
 
-        # Use raw epoch floats for caching & historical/forecast decision
         start_ts = float(synapse.start_time)
         end_ts = float(synapse.end_time)
 
-        # Prepare coordinates
         latitudes, longitudes = coordinates.view(-1, 2).T
         converter = get_converter(synapse.variable)
 
-        # Numpy view for cache key (preserve original grid ordering)
-        coords_np = coordinates.numpy()  # [lat, lon, 2]
+        coords_np = coordinates.numpy()
 
-        # --- Try cache first ---
+        # ---- Try Cache ----
         cached = self.weather_cache.get(
             variable=synapse.variable,
             start_time=start_ts,
@@ -107,15 +106,24 @@ class Miner(BaseMinerNeuron):
         )
 
         if cached is not None:
+            self.cache_hits += 1
+            self.output_source = "Cache"
+
             bt.logging.info(
-                f"Cache hit for {synapse.variable} | "
-                f"shape={cached.shape} | historical={end_ts <= time.time()}"
+                f"Cache HIT #{self.cache_hits} "
+                f"(req #{self.request_count}) for {synapse.variable}"
             )
+
             output = torch.from_numpy(cached)
-            self.output_source = 'Cache'
-            
+
         else:
-            # --- Cache miss: call Open-Meteo ---
+            # ---- Cache Miss → Open Meteo ----
+            self.api_calls += 1
+            self.output_source = "Open Meteo"
+
+            bt.logging.info(
+                f"Cache MISS → Open-Meteo call #{self.api_calls}"
+            )
 
             params = {
                 "latitude": latitudes.tolist(),
@@ -131,7 +139,6 @@ class Miner(BaseMinerNeuron):
                 method="POST",
             )
 
-            # get output as grid of [time, lat, lon, variables]
             output = torch.Tensor(
                 np.stack(
                     [
@@ -148,13 +155,10 @@ class Miner(BaseMinerNeuron):
                 )
             ).reshape(synapse.requested_hours, *coordinates.shape[:2], -1)
 
-            # [time, lat, lon] in case of single variable output
             output = output.squeeze(dim=-1)
-
-            # Convert variable(s) to ERA5 units, combines variables for windspeed
             output = converter.om_to_era5(output)
 
-            # Store CPU numpy array in cache
+            # store to cache
             self.weather_cache.set(
                 variable=synapse.variable,
                 start_time=start_ts,
@@ -163,9 +167,11 @@ class Miner(BaseMinerNeuron):
                 data=output.cpu().numpy(),
             )
 
-            self.output_source = 'Open Meteo'
-
-        bt.logging.info(f"Output shape is {output.shape} from {self.output_source}")
+        # --- Log output summary ---
+        bt.logging.info(
+            f"Output shape {output.shape} | from {self.output_source} | "
+            f"req={self.request_count} cache_hits={self.cache_hits} api_calls={self.api_calls}"
+        )
 
         synapse.predictions = output.tolist()
         synapse.version = zeus_version
