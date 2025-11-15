@@ -59,8 +59,8 @@ class BaseNeuron(ABC):
 
     def __init__(self, config=None):
         base_config = copy.deepcopy(config or BaseNeuron.config())
-        self.config = BaseNeuron.config() 
-        self.config.merge(base_config)     
+        self.config = self.config()
+        self.config.merge(base_config)
         self.check_config(self.config)
 
         # Set up logging with the provided configuration.
