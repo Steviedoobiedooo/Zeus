@@ -58,8 +58,10 @@ class BaseMinerNeuron(BaseNeuron):
         self.axon = bt.axon(
             wallet=self.wallet,
             config=self.config() if callable(self.config) else self.config,
-            external_ip=os.getenv("AXON_IP", "128.199.247.119"),
-            external_port=int(os.getenv("AXON_PORT", "11100"))
+            external_ip=os.getenv("AXON_IP", "127.0.0.1"),
+            exter_port=int(os.getenv("AXON_PORT", "11100")),
+            ip=os.getenv("AXON_BIND_IP", "0.0.0.0"),
+            port=int(os.getenv("AXON_PORT", "11100"))
         )
 
         bt.logging.info(f"Axon created: {self.axon}")
