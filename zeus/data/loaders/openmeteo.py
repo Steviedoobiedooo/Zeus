@@ -3,7 +3,7 @@ import openmeteo_requests
 
 import numpy as np
 import torch
-
+import bittensor as bt
 from zeus.data.sample import Era5Sample
 from zeus.data.converter import get_converter
 from zeus.utils.time import to_timestamp
@@ -26,6 +26,9 @@ class OpenMeteoLoader:
         start_time = to_timestamp(sample.start_timestamp)
         end_time = to_timestamp(sample.end_timestamp)
 
+        bt.logging.info(
+            f"Test Test: {self.api_key}"
+        )
         latitudes, longitudes = sample.x_grid.view(-1, 2).T
         converter = get_converter(sample.variable)
         params = {
