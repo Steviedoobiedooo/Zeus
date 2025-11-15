@@ -65,7 +65,7 @@ class Miner(BaseMinerNeuron):
         # Hybrid cache: disk (historical) + Redis (forecast)
         self.weather_cache = SmartWeatherCache(
             disk_dir="/home/steve/projects/Zeus/.cache",
-            max_bytes=50 * 1024 * 1024 * 1024,  # 50 GB
+            max_bytes=100 * 1024 * 1024 * 1024,  # 100 GB
             redis_url="redis://127.0.0.1:6379",
             forecast_ttl_seconds=2 * 60 * 60,   # 2 hours
         )
