@@ -26,9 +26,6 @@ class OpenMeteoLoader:
         start_time = to_timestamp(sample.start_timestamp)
         end_time = to_timestamp(sample.end_timestamp)
 
-        bt.logging.info(
-            f"Test Test: {self.api_key}"
-        )
         latitudes, longitudes = sample.x_grid.view(-1, 2).T
         converter = get_converter(sample.variable)
         params = {

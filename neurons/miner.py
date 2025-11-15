@@ -125,12 +125,11 @@ class Miner(BaseMinerNeuron):
 
         else:
             # ---- Cache Miss → Open Meteo ----
+            # ---- Cache Miss → Open Meteo ----
             self.api_calls += 1
             self.output_source = "Open Meteo"
 
-            bt.logging.info(
-                f"Cache MISS → Open-Meteo call #{self.api_calls}"
-            )
+            bt.logging.info(f"Cache MISS → Open-Meteo call #{self.api_calls}")
 
             params = {
                 "latitude": latitudes.tolist(),
@@ -140,8 +139,13 @@ class Miner(BaseMinerNeuron):
                 "end_hour": end_time_dt.isoformat(timespec="minutes"),
             }
 
+            # Add your paid API key
+            api_key = os.getenv("OPEN_METEO_API_KEY")
+            if api_key:
+                params["apikey"] = api_key
+
             responses = self.openmeteo_api.weather_api(
-                "https://api.open-meteo.com/v1/forecast",
+                "https://customer-api.open-meteo.com/v1/forecast",
                 params=params,
                 method="POST",
             )
