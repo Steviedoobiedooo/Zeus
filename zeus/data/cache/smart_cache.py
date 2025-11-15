@@ -30,7 +30,7 @@ class SmartWeatherCache:
         redis_url: str | None = None,
         forecast_ttl_seconds: int = 2 * 60 * 60,  # 2 hours
     ) -> None:
-        self.disk = DiskCache(disk_dir=disk_dir, max_bytes=max_bytes)
+        self.disk = DiskCache(base_dir=disk_dir, max_bytes=max_bytes)
         self.redis = RedisCache(url=redis_url) if redis_url else None
         self.forecast_ttl_seconds = forecast_ttl_seconds
 
