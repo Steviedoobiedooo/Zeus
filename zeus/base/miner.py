@@ -15,6 +15,7 @@
 # OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 # DEALINGS IN THE SOFTWARE.
 
+import os
 import time
 import asyncio
 import threading
@@ -57,6 +58,8 @@ class BaseMinerNeuron(BaseNeuron):
         self.axon = bt.axon(
             wallet=self.wallet,
             config=self.config() if callable(self.config) else self.config,
+            external_ip=os.getenv("AXON_IP", "128.199.247.119"),
+            external_port=int(os.getenv("AXON_PORT", "11100"))
         )
 
         bt.logging.info(f"Axon created: {self.axon}")
@@ -225,7 +228,7 @@ class BaseMinerNeuron(BaseNeuron):
         if synapse.dendrite is None or synapse.dendrite.hotkey is None:
             bt.logging.warning("Received a request without a dendrite or hotkey.")
             return True, "Missing dendrite or hotkey"
-
+            
         uid = self.metagraph.hotkeys.index(synapse.dendrite.hotkey)
         if (
             not self.config.blacklist.allow_non_registered
