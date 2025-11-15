@@ -104,5 +104,5 @@ if __name__ == "__main__":
     restart_miner()
 
     # Loop only if at least one feature active
-    if not args.no_auto-update or args.self_heal:
+    if not args.no_auto_update or args.self_heal:
         run_loop(enable_update=not args.no_auto_update, enable_self_heal=args.self_heal)
