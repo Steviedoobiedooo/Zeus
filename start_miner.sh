@@ -18,7 +18,10 @@ pm2 start neurons/miner.py --name $MINER_PROCESS_NAME -- \
   --subtensor.chain_endpoint $SUBTENSOR_CHAIN_ENDPOINT \
   --wallet.name $WALLET_NAME \
   --wallet.hotkey $WALLET_HOTKEY \
+  --axon.ip 0.0.0.0 \
+  --axon.external_ip $AXON_EXTERNAL_IP \
   --axon.port $AXON_PORT \
+  --axon.external_port $AXON_PORT \
   --blacklist.force_validator_permit $BLACKLIST_FORCE_VALIDATOR_PERMIT \
   --logging.debug
 
