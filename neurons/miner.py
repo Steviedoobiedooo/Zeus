@@ -97,6 +97,20 @@ class Miner(BaseMinerNeuron):
 
         coords_np = coordinates.numpy()
 
+        # ---- Debug logging for cache analysis ----
+        bt.logging.info(
+            f"[CACHE DEBUG] variable={synapse.variable} | "
+            f"start_ts={start_ts} | end_ts={end_ts} | "
+            f"coords_shape={coords_np.shape}"
+        )
+
+        # sample 3 coordinates only to avoid flooding logs
+        try:
+            sample_coords = coords_np.reshape(-1, 2)[:3]
+            bt.logging.info(f"[CACHE DEBUG] sample_coords={sample_coords.tolist()}")
+        except Exception:
+            bt.logging.info("[CACHE DEBUG] failed to extract sample coords")
+            
         # ---- Try Cache ----
         cached = self.weather_cache.get(
             variable=synapse.variable,

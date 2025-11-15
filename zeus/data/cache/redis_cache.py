@@ -1,16 +1,15 @@
 # zeus/data/cache/redis_cache.py
 
-import logging
+import io
 from typing import Optional
 
 import numpy as np
+import bittensor as bt
 
 try:
     import redis  # type: ignore
 except ImportError:
     redis = None
-
-logger = logging.getLogger(__name__)
 
 
 class RedisCache:
@@ -21,51 +20,67 @@ class RedisCache:
 
     def __init__(self, url: str | None = None) -> None:
         self.client = None
+
         if not url:
-            logger.info("RedisCache: no URL provided, disabled.")
+            bt.logging.info("[REDIS CACHE] No URL provided → Disabled.")
             return
 
         if redis is None:
-            logger.warning("RedisCache: redis-py not installed; cache disabled.")
+            bt.logging.warning("[REDIS CACHE] redis-py not installed → Cache disabled.")
             return
 
         try:
             self.client = redis.Redis.from_url(url)
+
             # Test connection
             self.client.ping()
-            logger.info("RedisCache: connected to %s", url)
+            bt.logging.info(f"[REDIS CACHE] Connected to {url}")
+
         except Exception as e:
-            logger.warning("RedisCache: connection failed (%s); cache disabled.", e)
+            bt.logging.warning(
+                f"[REDIS CACHE] Connection failed ({e}) → Cache disabled."
+            )
             self.client = None
 
     def get(self, key: str) -> Optional[np.ndarray]:
         if self.client is None:
             return None
 
-        data = self.client.get(key)
-        if data is None:
+        try:
+            data = self.client.get(key)
+        except Exception as e:
+            bt.logging.warning(f"[REDIS CACHE] GET failed for key={key[:12]}... ({e})")
             return None
 
-        import io
+        if data is None:
+            return None
 
         try:
             buf = io.BytesIO(data)
             arr = np.load(buf, allow_pickle=False)
             return arr
+
         except Exception as e:
-            logger.warning("RedisCache: failed to load key %s (%s)", key, e)
+            bt.logging.warning(
+                f"[REDIS CACHE] Failed to load key={key[:12]}... ({e})"
+            )
             return None
 
     def set(self, key: str, value: np.ndarray, ttl_seconds: int | None = None) -> None:
         if self.client is None:
             return
 
-        import io
-
         try:
             buf = io.BytesIO()
-            # Store as raw numpy .npy
             np.save(buf, value)
+
             self.client.set(key, buf.getvalue(), ex=ttl_seconds)
+
+            bt.logging.debug(
+                f"[REDIS CACHE] STORED key={key[:12]}... ttl={ttl_seconds}s"
+            )
+
         except Exception as e:
-            logger.warning("RedisCache: failed to store key %s (%s)", key, e)
+            bt.logging.warning(
+                f"[REDIS CACHE] Failed to store key={key[:12]}... ({e})"
+            )

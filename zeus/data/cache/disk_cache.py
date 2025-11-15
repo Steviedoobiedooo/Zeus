@@ -1,12 +1,10 @@
 # zeus/data/cache/disk_cache.py
 
-import logging
 import os
 from typing import Optional
 
 import numpy as np
-
-logger = logging.getLogger(__name__)
+import bittensor as bt
 
 
 class DiskCache:
@@ -19,24 +17,28 @@ class DiskCache:
         self.base_dir = base_dir
         self.max_bytes = max_bytes
         os.makedirs(self.base_dir, exist_ok=True)
-        logger.info(
-            "DiskCache: base_dir=%s, max_bytes=%.2f GB",
-            self.base_dir,
-            self.max_bytes / (1024**3),
+
+        bt.logging.info(
+            f"[DISK CACHE] Initialized | base_dir={self.base_dir} | "
+            f"max_bytes={self.max_bytes / (1024**3):.2f} GB"
         )
 
     def _path_for_key(self, key: str) -> str:
-        # Flat layout is fine for now; key is already a short hex string.
         return os.path.join(self.base_dir, f"{key}.npy")
 
     def get(self, key: str) -> Optional[np.ndarray]:
         path = self._path_for_key(key)
+
         if not os.path.exists(path):
             return None
+
         try:
             return np.load(path, allow_pickle=False)
+
         except Exception as e:
-            logger.warning("DiskCache: failed to load %s (%s), deleting file", path, e)
+            bt.logging.warning(
+                f"[DISK CACHE] Failed to load {path} ({e}), deleting file."
+            )
             try:
                 os.remove(path)
             except OSError:
@@ -46,46 +48,59 @@ class DiskCache:
     def set(self, key: str, value: np.ndarray) -> None:
         if self.max_bytes <= 0:
             return
+
         path = self._path_for_key(key)
         try:
             np.save(path, value)
         except Exception as e:
-            logger.warning("DiskCache: failed to save %s (%s)", path, e)
+            bt.logging.warning(
+                f"[DISK CACHE] Failed to save {path} ({e})"
+            )
             return
+
+        # Enforce storage limit after saving
         self._enforce_limit()
 
     def _enforce_limit(self) -> None:
         if self.max_bytes <= 0:
             return
 
-        total = 0
+        total_size = 0
         files = []
 
         try:
             for entry in os.scandir(self.base_dir):
                 if not entry.is_file():
                     continue
+
                 try:
                     st = entry.stat()
                 except OSError:
                     continue
+
                 size = st.st_size
-                total += size
+                total_size += size
                 files.append((entry.path, st.st_mtime, size))
+
         except FileNotFoundError:
             return
 
-        if total <= self.max_bytes:
+        if total_size <= self.max_bytes:
             return
 
-        # Oldest files first
+        # Remove oldest files first
         files.sort(key=lambda x: x[1])
 
         for path, _mtime, size in files:
-            if total <= self.max_bytes:
+            if total_size <= self.max_bytes:
                 break
+
             try:
                 os.remove(path)
-                total -= size
+                total_size -= size
+                bt.logging.debug(
+                    f"[DISK CACHE] Evicted {os.path.basename(path)} "
+                    f"({size / (1024**2):.2f} MB)"
+                )
             except OSError:
                 continue
