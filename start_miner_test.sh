@@ -4,7 +4,7 @@ set -a
 source miner_test.env
 set +a
 
-MINER_PROCESS_NAME="zeus_miner"
+MINER_PROCESS_NAME="zeus_miner_test"
 
 
 if pm2 list | grep -q "$MINER_PROCESS_NAME"; then
