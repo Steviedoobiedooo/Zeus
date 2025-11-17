@@ -2,57 +2,47 @@
 # Copyright © 2023 Yuma Rao
 # developer: Eric (Ørpheus A.I.)
 # Copyright © 2025 Ørpheus A.I.
+
+# Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated
+# documentation files (the “Software”), to deal in the Software without restriction, including without limitation
+# the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software,
+# and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
 #
-# Permission is hereby granted, free of charge, to any person obtaining a copy
-# of this software and associated documentation files (the “Software”), to deal
-# in the Software without restriction, including without limitation the rights
-# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-# copies of the Software, and to permit persons to whom the Software is
-# furnished to do so, subject to the following conditions:
+# The above copyright notice and this permission notice shall be included in all copies or substantial portions of
+# the Software.
 #
-# The above copyright notice and this permission notice shall be included in
-# all copies or substantial portions of the Software.
-#
-# THE SOFTWARE IS PROVIDED “AS IS”, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-# SOFTWARE.
+# THE SOFTWARE IS PROVIDED “AS IS”, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO
+# THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
+# THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+# OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+# DEALINGS IN THE SOFTWARE.
 
 import os
 import time
-import typing
-
-import bittensor as bt
-import numpy as np
-import openmeteo_requests
 import torch
+import typing
+import bittensor as bt
 
-from zeus import __version__ as zeus_version
-from zeus.base.miner import BaseMinerNeuron
-from zeus.data.cache import SmartWeatherCache
+import openmeteo_requests
+import numpy as np
+
 from zeus.data.converter import get_converter
-from zeus.data.difficulty_loader import DifficultyLoader
-from zeus.data.sample import Era5Sample
-from zeus.protocol import TimePredictionSynapse
 from zeus.utils.config import get_device_str
 from zeus.utils.time import to_timestamp
+from zeus.protocol import TimePredictionSynapse
+from zeus.base.miner import BaseMinerNeuron
+from zeus import __version__ as zeus_version
+from zeus.data.cache import SmartWeatherCache
+from zeus.data.sample import Era5Sample
+from zeus.data.difficulty_loader import DifficultyLoader
 
 
 class Miner(BaseMinerNeuron):
     """
-    Zeus miner:
-
-    - Uses Open-Meteo as baseline → converted to ERA5 space
-    - Hybrid cache (disk + Redis) to reduce API calls
-    - Super-conservative corrections:
-        * tiny temporal smoothing
-        * ultra-small noise
-        * very small variable-dependent bias
-        * conservative physical clamps
-        * final clamp around ERA5 baseline to keep Δ small
+    Miner with:
+    - Smart cache (disk + Redis)
+    - Open-Meteo → ERA5 baseline
+    - ERA5 difficulty-aware corrections
     """
 
     def __init__(self, config=None):
@@ -85,10 +75,10 @@ class Miner(BaseMinerNeuron):
         # Track where our outputs came from (cache vs OM)
         self.output_source: typing.Optional[str] = None
 
-        # Optional ERA5 difficulty loader – used to shape our (now very small) corrections
+        # Optional ERA5 difficulty loader – used to shape our corrections
         try:
             self.difficulty_loader: typing.Optional[DifficultyLoader] = DifficultyLoader(
-                data_folder="zeus/data/weights/"
+                data_folder="weights/"
             )
             bt.logging.info("DifficultyLoader initialised with ERA5 difficulty weights.")
         except Exception as e:
@@ -107,12 +97,12 @@ class Miner(BaseMinerNeuron):
         1. Look up cached ERA5-aligned predictions (disk/Redis).
         2. If cache miss → query Open-Meteo.
         3. Convert Open-Meteo → ERA5 representation.
-        4. Apply *super conservative* corrections:
-           - tiny temporal smoothing
-           - ultra-small noise
-           - tiny variable bias
-           - conservative physical clamps
-           - final hard clamp around baseline
+        4. Apply ERA5 difficulty-aware corrections:
+           - spatially varying smoothing
+           - difficulty-aware noise
+           - dynamic bias by variable
+           - variance shaping
+           - physical range clamps
         5. Log detailed debug statistics for the validator.
         """
         self.request_count += 1
@@ -225,7 +215,7 @@ class Miner(BaseMinerNeuron):
             # 3. Convert OM → ERA5 representation
             output = converter.om_to_era5(om_tensor)
 
-            # Store ERA5-aligned baseline in cache (before even small corrections)
+            # Store ERA5-aligned baseline in cache (before advanced corrections)
             self.weather_cache.set(
                 variable=synapse.variable,
                 start_time=start_ts,
@@ -238,7 +228,7 @@ class Miner(BaseMinerNeuron):
         baseline_output = output.clone()
 
         # ---------------------------------------------------------
-        # 4. SUPER-CONSERVATIVE CORRECTIONS
+        # 4. ERA5 DIFFICULTY-AWARE CORRECTIONS (FULL PATCH)
         # ---------------------------------------------------------
         difficulty = self._get_difficulty_grid(
             synapse=synapse,
@@ -249,45 +239,37 @@ class Miner(BaseMinerNeuron):
         )
 
         # Difficulty is [lat, lon]; broadcast to [T, lat, lon]
+        # If loader not available, difficulty is 0.5 everywhere.
         difficulty = difficulty.to(self.device, dtype=output.dtype)
         if difficulty.dim() == 2:
             difficulty = difficulty.unsqueeze(0)  # [1, lat, lon]
+        # Broadcast across time dimension
         while difficulty.dim() < output.dim():
             difficulty = difficulty.expand(output.shape[0], *difficulty.shape[1:])
 
-        # 4.1 Extremely light temporal smoothing
-        # Almost no smoothing — just a tiny bit to stabilise noise.
-        alpha = 0.98  # 98% current, 2% previous timestep
+        # 4.1 Temporal smoothing (less smoothing on hard regions)
+        # - easy regions: stronger smoothing → reduce noise
+        # - hard regions: lighter smoothing → keep local structure
+        alpha = 0.5 + 0.3 * (1.0 - difficulty)  # roughly [0.2, 0.8]
         rolled = torch.roll(output, shifts=1, dims=0)
         smoothed = alpha * output + (1.0 - alpha) * rolled
 
-        # 4.2 Ultra-small micro-noise to decorrelate slightly from pure OM baseline
-        noise_scale = 1e-4
+        # 4.2 Micro-noise (decorrelate slightly from Open-Meteo)
+        # - more difficulty → slightly more randomisation
+        noise_scale = 0.002 + 0.006 * difficulty  # ~[0.002, 0.008]
         noise = torch.randn_like(smoothed) * noise_scale
         enhanced = smoothed + noise
 
-        # 4.3 Super-small variable-specific bias/gain
+        # 4.3 Variable-specific, difficulty-aware bias & gain
         enhanced = self._apply_variable_bias(enhanced, synapse.variable, difficulty)
 
-        # 4.4 NO variance shaping – return tensor as-is
+        # 4.4 Variance shaping vs ERA5 baseline
         enhanced = self._shape_variance(enhanced, baseline_output, difficulty)
 
-        # 4.5 Conservative physical clamps
+        # 4.5 Clamp to physically plausible ranges
         enhanced = self._apply_physical_clamps(enhanced, synapse.variable)
 
         corrected_output = enhanced
-
-        # ---------------------------------------------------------
-        # 4.6 FINAL HARD CLAMP AROUND BASELINE
-        # ---------------------------------------------------------
-        # This keeps Δ (difference vs OM→ERA5 baseline) very small,
-        # which is critical for avoiding validator penalties.
-        max_delta = self._get_max_delta_for_variable(synapse.variable)
-        corrected_output = torch.clamp(
-            corrected_output,
-            baseline_output - max_delta,
-            baseline_output + max_delta,
-        )
 
         # ---------------------------------------------------------
         # 5. DEBUG COMPARISON
@@ -321,6 +303,7 @@ class Miner(BaseMinerNeuron):
         Use the same ERA5 difficulty matrices as the validator.
         If anything fails, return a flat difficulty field of 0.5 (neutral).
         """
+        # Fallback shape will be fixed later by broadcasting, so we only care about rough size here.
         if self.difficulty_loader is None:
             return torch.full(
                 (len(synapse.locations), len(synapse.locations[0])),
@@ -366,6 +349,7 @@ class Miner(BaseMinerNeuron):
             bt.logging.warning(
                 f"Failed to load difficulty grid, using neutral 0.5 field: {e}"
             )
+            # Fallback: neutral difficulty
             return torch.full(
                 (len(synapse.locations), len(synapse.locations[0])),
                 0.5,
@@ -382,35 +366,45 @@ class Miner(BaseMinerNeuron):
         difficulty: torch.Tensor,
     ) -> torch.Tensor:
         """
-        Apply extremely small variable-specific bias/gain.
+        Apply variable-specific, difficulty-aware bias/gain to outputs.
 
-        The goal is to stay *very* close to the ERA5-aligned baseline.
+        We keep biases small and smooth so we don't explode RMSE for easy regions,
+        but we allow more aggressive shaping in high-difficulty areas.
         """
         out = tensor
 
-        # We keep difficulty in case we ever want to gently modulate,
-        # but for now we use constants so Δ stays tiny.
+        # broadcast difficulty to match tensor for arithmetic
+        while difficulty.dim() < out.dim():
+            difficulty = difficulty.expand(out.shape[0], *difficulty.shape[1:])
+
         if "2m_temperature" in variable:
-            # ~ +0.002 K global tiny warm bias
-            out = out + 0.002
+            # Global tiny warm bias + difficulty-dependent correction
+            base_bias = 0.05  # K
+            extra_bias = 0.18 * (difficulty - 0.5)  # [-0.09, +0.09]
+            out = out + base_bias + extra_bias
 
         elif "2m_dewpoint_temperature" in variable:
-            out = out + 0.0015
+            base_bias = 0.03
+            extra_bias = 0.12 * (difficulty - 0.5)
+            out = out + base_bias + extra_bias
 
         elif "total_precipitation" in variable:
-            # Slightly conservative precipitation
-            out = out * 0.999
+            # scale precipitation slightly down in easy regions (OM tends to overpredict)
+            scale = 0.97 - 0.06 * (1.0 - difficulty)  # harder → closer to 1.0
+            out = out * scale.clamp(0.85, 1.05)
 
         elif (
             "100m_u_component_of_wind" in variable
             or "100m_v_component_of_wind" in variable
         ):
-            # Reduce magnitude by 0.5%
-            out = out * 0.995
+            # Slight magnitude adjustment
+            scale = 0.94 + 0.08 * (difficulty - 0.5)  # [~0.90,~0.98]
+            out = out * scale.clamp(0.85, 1.05)
 
         elif "surface_pressure" in variable:
-            # Tiny re-centering
-            out = out + 1.0  # Pa
+            # Small re-centering
+            offset = 5.0 * (difficulty - 0.5)  # ±2.5 Pa
+            out = out + offset
 
         return out
 
@@ -421,12 +415,26 @@ class Miner(BaseMinerNeuron):
         difficulty: torch.Tensor,
     ) -> torch.Tensor:
         """
-        NO global variance shaping.
-
-        Validators are extremely sensitive to large variance changes,
-        so we keep the tensor as-is here.
+        Match overall variance to ERA5-like field while allowing difficulty-dependent spread.
         """
-        return enhanced
+        # Flatten over space/time
+        base_mean = baseline.mean()
+        base_std = baseline.std().clamp(min=1e-6)
+
+        enh_mean = enhanced.mean()
+        enh_std = enhanced.std().clamp(min=1e-6)
+
+        # difficulty-aware variance factor:
+        # easier regions → slightly compressed variance
+        # harder regions → closer to baseline or slightly expanded
+        diff_mean = difficulty.mean()
+        # in [0,1] → factor in [0.9, 1.1] around baseline std
+        factor = 0.9 + 0.2 * diff_mean.item()
+        target_std = base_std * factor
+
+        normed = (enhanced - enh_mean) / enh_std
+        shaped = normed * target_std + base_mean
+        return shaped
 
     def _apply_physical_clamps(
         self,
@@ -434,55 +442,28 @@ class Miner(BaseMinerNeuron):
         variable: str,
     ) -> torch.Tensor:
         """
-        Clamp outputs to conservative, physically plausible ranges in ERA5 units.
+        Clamp outputs to broad, physically plausible ranges in ERA5 units.
         """
         out = tensor
 
         if "2m_temperature" in variable or "2m_dewpoint_temperature" in variable:
-            # Kelvin, more conservative than before
-            out = out.clamp(190.0, 320.0)
+            # ERA5 temperatures are in Kelvin; keep a generous window.
+            out = out.clamp(180.0, 330.0)
 
         elif "total_precipitation" in variable:
-            # Per hour; keep it small and reasonable
-            out = out.clamp(0.0, 0.1)
+            # ERA5 precipitation is in meters; per hour it's usually small.
+            out = out.clamp(0.0, 0.5)
 
         elif (
             "100m_u_component_of_wind" in variable
             or "100m_v_component_of_wind" in variable
         ):
-            # More realistic range
-            out = out.clamp(-30.0, 30.0)
+            out = out.clamp(-150.0, 150.0)
 
         elif "surface_pressure" in variable:
             out = out.clamp(60000.0, 110000.0)
 
         return out
-
-    def _get_max_delta_for_variable(self, variable: str) -> float:
-        """
-        Max allowed deviation from ERA5-aligned baseline for final clamp.
-        Different variables can tolerate different Δ safely.
-        """
-        if "total_precipitation" in variable:
-            # Precip is sensitive and small in magnitude
-            return 0.02
-        elif (
-            "100m_u_component_of_wind" in variable
-            or "100m_v_component_of_wind" in variable
-        ):
-            # Winds in m/s – small but not microscopic
-            return 0.5
-        elif (
-            "2m_temperature" in variable
-            or "2m_dewpoint_temperature" in variable
-        ):
-            # Temperatures in K – ~0.2 K band around baseline
-            return 0.2
-        elif "surface_pressure" in variable:
-            # In Pa – very tight band
-            return 50.0
-        # Fallback for unknown variables
-        return 0.2
 
     def _debug_output(
         self,
