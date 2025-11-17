@@ -88,7 +88,7 @@ class Miner(BaseMinerNeuron):
         # Optional ERA5 difficulty loader – used to shape our (now very small) corrections
         try:
             self.difficulty_loader: typing.Optional[DifficultyLoader] = DifficultyLoader(
-                data_folder="zeus/data/weights/"
+                data_folder="weights/"
             )
             bt.logging.info("DifficultyLoader initialised with ERA5 difficulty weights.")
         except Exception as e:
