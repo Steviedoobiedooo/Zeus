@@ -85,7 +85,7 @@ class Miner(BaseMinerNeuron):
         # Track where our outputs came from (cache vs OM)
         self.output_source: typing.Optional[str] = None
 
-        # Optional ERA5 difficulty loader – used to shape our (now very small) corrections
+        # Optional ERA5 difficulty loader – used mainly for logging / potential shaping
         try:
             self.difficulty_loader: typing.Optional[DifficultyLoader] = DifficultyLoader(
                 data_folder="weights/"
@@ -225,7 +225,7 @@ class Miner(BaseMinerNeuron):
             # 3. Convert OM → ERA5 representation
             output = converter.om_to_era5(om_tensor)
 
-            # Store ERA5-aligned baseline in cache (before even small corrections)
+            # Store ERA5-aligned baseline in cache (before corrections)
             self.weather_cache.set(
                 variable=synapse.variable,
                 start_time=start_ts,
@@ -247,13 +247,8 @@ class Miner(BaseMinerNeuron):
             start_ts=start_ts,
             end_ts=end_ts,
         )
-
-        # Difficulty is [lat, lon]; broadcast to [T, lat, lon]
+        # Only used for logging / potential light shaping
         difficulty = difficulty.to(self.device, dtype=output.dtype)
-        if difficulty.dim() == 2:
-            difficulty = difficulty.unsqueeze(0)  # [1, lat, lon]
-        while difficulty.dim() < output.dim():
-            difficulty = difficulty.expand(output.shape[0], *difficulty.shape[1:])
 
         # 4.1 Extremely light temporal smoothing
         # Almost no smoothing — just a tiny bit to stabilise noise.
@@ -269,7 +264,7 @@ class Miner(BaseMinerNeuron):
         # 4.3 Super-small variable-specific bias/gain
         enhanced = self._apply_variable_bias(enhanced, synapse.variable, difficulty)
 
-        # 4.4 NO variance shaping – return tensor as-is
+        # 4.4 NO variance shaping – keep tensor as-is
         enhanced = self._shape_variance(enhanced, baseline_output, difficulty)
 
         # 4.5 Conservative physical clamps
@@ -379,7 +374,7 @@ class Miner(BaseMinerNeuron):
         self,
         tensor: torch.Tensor,
         variable: str,
-        difficulty: torch.Tensor,
+        difficulty: torch.Tensor,  # kept for future use if needed
     ) -> torch.Tensor:
         """
         Apply extremely small variable-specific bias/gain.
@@ -388,8 +383,6 @@ class Miner(BaseMinerNeuron):
         """
         out = tensor
 
-        # We keep difficulty in case we ever want to gently modulate,
-        # but for now we use constants so Δ stays tiny.
         if "2m_temperature" in variable:
             # ~ +0.002 K global tiny warm bias
             out = out + 0.002
@@ -418,7 +411,7 @@ class Miner(BaseMinerNeuron):
         self,
         enhanced: torch.Tensor,
         baseline: torch.Tensor,
-        difficulty: torch.Tensor,
+        difficulty: torch.Tensor,  # unused, kept for interface stability
     ) -> torch.Tensor:
         """
         NO global variance shaping.
@@ -439,7 +432,7 @@ class Miner(BaseMinerNeuron):
         out = tensor
 
         if "2m_temperature" in variable or "2m_dewpoint_temperature" in variable:
-            # Kelvin, more conservative than before
+            # Kelvin, conservative range
             out = out.clamp(190.0, 320.0)
 
         elif "total_precipitation" in variable:
@@ -450,7 +443,7 @@ class Miner(BaseMinerNeuron):
             "100m_u_component_of_wind" in variable
             or "100m_v_component_of_wind" in variable
         ):
-            # More realistic range
+            # Realistic wind range in m/s
             out = out.clamp(-30.0, 30.0)
 
         elif "surface_pressure" in variable:
@@ -460,29 +453,33 @@ class Miner(BaseMinerNeuron):
 
     def _get_max_delta_for_variable(self, variable: str) -> float:
         """
-        Max allowed deviation from ERA5-aligned baseline for final clamp.
-        Different variables can tolerate different Δ safely.
+        Ultra-tight max deviations to stay inside ERA5 natural noise.
         """
         if "total_precipitation" in variable:
-            # Precip is sensitive and small in magnitude
-            return 0.02
-        elif (
+            # Precip is tiny; must be very tight
+            return 0.002
+
+        if (
             "100m_u_component_of_wind" in variable
             or "100m_v_component_of_wind" in variable
         ):
-            # Winds in m/s – small but not microscopic
-            return 0.5
-        elif (
-            "2m_temperature" in variable
-            or "2m_dewpoint_temperature" in variable
-        ):
-            # Temperatures in K – ~0.2 K band around baseline
-            return 0.2
-        elif "surface_pressure" in variable:
-            # In Pa – very tight band
-            return 50.0
+            # Winds in m/s – natural hour-to-hour change ~0.03–0.1
+            return 0.08
+
+        if "2m_temperature" in variable:
+            # Temps: ERA5 noise is ~0.02–0.05 K
+            return 0.05
+
+        if "2m_dewpoint_temperature" in variable:
+            # Dewpoint similar
+            return 0.05
+
+        if "surface_pressure" in variable:
+            # In Pa – tight band
+            return 15.0
+
         # Fallback for unknown variables
-        return 0.2
+        return 0.05
 
     def _debug_output(
         self,
